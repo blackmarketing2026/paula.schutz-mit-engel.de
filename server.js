@@ -7,7 +7,9 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const SESSION_SECRET = process.env.SESSION_SECRET || "local-dev-change-me";
 const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || "local-demo-token";
-const DATA_DIR = path.join(__dirname, "data");
+// Vercel only allows writing to /tmp (ephemeral, per instance)
+const DATA_DIR = process.env.VERCEL ? "/tmp/paula-data" : path.join(__dirname, "data");
+const SESSION_MAX_AGE = 60 * 60 * 24 * 7;
 const STORE_PATH = path.join(DATA_DIR, "store.json");
 
 const MAIL_HOST_DEFAULT = "w01997c4.kasserver.com";
@@ -118,27 +120,33 @@ function sign(value) {
   return crypto.createHmac("sha256", SESSION_SECRET).update(value).digest("hex");
 }
 
-function createSession(res, userId) {
-  const sessionId = crypto.randomUUID();
-  const store = readStore();
-  store.sessions[sessionId] = { userId, createdAt: nowIso() };
-  writeStore(store);
-  const token = `${sessionId}.${sign(sessionId)}`;
+// Stateless session: signed cookie with email + expiry, so it survives serverless instance changes
+function createSession(res, user) {
+  const expires = Date.now() + SESSION_MAX_AGE * 1000;
+  const payload = Buffer.from(JSON.stringify({ email: user.email.toLowerCase(), expires })).toString("base64url");
+  const token = `${payload}.${sign(payload)}`;
   res.setHeader(
     "Set-Cookie",
-    `flc_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=604800`
+    `flc_session=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MAX_AGE}${process.env.VERCEL ? "; Secure" : ""}`
   );
 }
 
 function getCurrentUser(req) {
   const token = parseCookies(req).flc_session;
   if (!token) return null;
-  const [sessionId, signature] = token.split(".");
-  if (!sessionId || signature !== sign(sessionId)) return null;
+  const [payload, signature] = token.split(".");
+  if (!payload || !signature) return null;
+  const expected = sign(payload);
+  if (signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+  let session;
+  try {
+    session = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (!session.email || Date.now() > Number(session.expires)) return null;
   const store = readStore();
-  const session = store.sessions[sessionId];
-  if (!session) return null;
-  return store.users.find((user) => user.id === session.userId) || null;
+  return store.users.find((user) => user.active !== false && user.email.toLowerCase() === session.email) || null;
 }
 
 function requireAuth(req, res, next) {
@@ -245,16 +253,11 @@ app.post("/api/login", (req, res) => {
   if (!user || !verifyPassword(String(password || ""), user.passwordHash)) {
     return res.status(401).json({ error: "E-Mail oder Passwort stimmt nicht" });
   }
-  createSession(res, user.id);
+  createSession(res, user);
   res.json({ user: publicUser(user) });
 });
 
-app.post("/api/logout", requireAuth, (req, res) => {
-  const token = parseCookies(req).flc_session;
-  const [sessionId] = String(token || "").split(".");
-  const store = readStore();
-  delete store.sessions[sessionId];
-  writeStore(store);
+app.post("/api/logout", (req, res) => {
   res.setHeader("Set-Cookie", "flc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
   res.json({ ok: true });
 });
