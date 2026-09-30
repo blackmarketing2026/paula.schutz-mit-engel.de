@@ -60,71 +60,22 @@ function ensureStore() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (fs.existsSync(STORE_PATH)) return;
 
+  const adminPassword = process.env.ADMIN_PASSWORD || crypto.randomBytes(12).toString("base64url");
+  if (!process.env.ADMIN_PASSWORD) console.warn(`ADMIN_PASSWORD not set, generated one-time password: ${adminPassword}`);
+
   const users = [
     {
       id: crypto.randomUUID(),
       name: "Admin",
-      email: "admin@example.com",
+      email: process.env.ADMIN_EMAIL || "admin@schutz-mit-engel.de",
       role: "admin",
       active: true,
       order: 0,
-      passwordHash: hashPassword("admin123"),
-      createdAt: nowIso()
-    },
-    {
-      id: crypto.randomUUID(),
-      name: "Mia Vertrieb",
-      email: "mia@example.com",
-      role: "sales",
-      active: true,
-      order: 1,
-      passwordHash: hashPassword("vertrieb123"),
-      createdAt: nowIso()
-    },
-    {
-      id: crypto.randomUUID(),
-      name: "Noah Vertrieb",
-      email: "noah@example.com",
-      role: "sales",
-      active: true,
-      order: 2,
-      passwordHash: hashPassword("vertrieb123"),
-      createdAt: nowIso()
-    },
-    {
-      id: crypto.randomUUID(),
-      name: "Lea Vertrieb",
-      email: "lea@example.com",
-      role: "sales",
-      active: true,
-      order: 3,
-      passwordHash: hashPassword("vertrieb123"),
+      passwordHash: hashPassword(adminPassword),
       createdAt: nowIso()
     }
   ];
-
-  const leads = [
-    makeLead(
-      {
-        full_name: "Sophie Berger",
-        email: "sophie.berger@example.com",
-        phone_number: "+49 151 23456789",
-        campaign_name: "Facebook Solar Anfrage",
-        message: "Bitte um Rückruf am Nachmittag."
-      },
-      users[1]
-    ),
-    makeLead(
-      {
-        name: "Daniel Klein",
-        email: "daniel.klein@example.com",
-        phone: "+49 160 9876543",
-        form_name: "Immobilienbewertung",
-        city: "Köln"
-      },
-      users[2]
-    )
-  ];
+  const leads = [];
 
   writeStore({
     settings: { rotationIndex: 0 },
@@ -350,8 +301,8 @@ app.patch("/api/leads/:id", requireAuth, (req, res) => {
 
 app.post("/api/users", requireAuth, requireAdmin, (req, res) => {
   const store = readStore();
-  const { name, email, role = "sales", password = "vertrieb123" } = req.body || {};
-  if (!name || !email) return res.status(400).json({ error: "Name und E-Mail sind Pflicht" });
+  const { name, email, role = "sales", password } = req.body || {};
+  if (!name || !email || !password) return res.status(400).json({ error: "Name, E-Mail und Passwort sind Pflicht" });
   if (store.users.some((user) => user.email.toLowerCase() === String(email).toLowerCase())) {
     return res.status(409).json({ error: "Diese E-Mail existiert bereits" });
   }
@@ -431,5 +382,4 @@ app.get("*", (req, res) => {
 app.listen(PORT, () => {
   ensureStore();
   console.log(`Facebook Lead Center läuft auf http://localhost:${PORT}`);
-  console.log("Admin Login: admin@example.com / admin123");
 });

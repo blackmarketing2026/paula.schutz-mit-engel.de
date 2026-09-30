@@ -77,14 +77,13 @@ function renderLogin() {
       </div>
       <form class="login-panel" id="loginForm">
         <h2>Einloggen</h2>
-        <p class="muted">Admin: admin@example.com / admin123</p>
         <label class="field">
           <span>E-Mail</span>
-          <input name="email" type="email" value="admin@example.com" autocomplete="email" required />
+          <input name="email" type="email" autocomplete="email" required />
         </label>
         <label class="field">
           <span>Passwort</span>
-          <input name="password" type="password" value="admin123" autocomplete="current-password" required />
+          <input name="password" type="password" autocomplete="current-password" required />
         </label>
         <button class="btn full" type="submit">${icon("log-in")} Einloggen</button>
       </form>
@@ -275,7 +274,7 @@ function renderTeamView() {
         <form id="userForm">
           <label class="field"><span>Name</span><input name="name" required /></label>
           <label class="field"><span>E-Mail</span><input name="email" type="email" required /></label>
-          <label class="field"><span>Startpasswort</span><input name="password" value="vertrieb123" required /></label>
+          <label class="field"><span>Startpasswort</span><input name="password" type="text" minlength="8" required /></label>
           <button class="btn full" type="submit">${icon("user-plus")} Hinzufügen</button>
         </form>
       </section>
