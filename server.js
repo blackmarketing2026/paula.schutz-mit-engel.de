@@ -19,6 +19,13 @@ const MAIL_CONFIG = {
   imap: { host: "w01997c4.kasserver.com", port: 993, secure: true },
 };
 
+// Inbox that receives leads as JSON emails
+const LEADS_MAIL_CONFIG = {
+  user: process.env.LEADS_MAIL_USER || "",
+  pass: process.env.LEADS_MAIL_PASS || "",
+  imap: { host: "w01997c4.kasserver.com", port: 993, secure: true },
+};
+
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
