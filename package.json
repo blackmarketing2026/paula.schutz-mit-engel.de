@@ -1,0 +1,17 @@
+{
+  "name": "facebook-lead-center",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Local Facebook lead dashboard with webhook intake and round-robin assignment.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
