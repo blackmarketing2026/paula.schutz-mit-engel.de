@@ -60,18 +60,20 @@ function ensureStore() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (fs.existsSync(STORE_PATH)) return;
 
-  const adminPassword = process.env.ADMIN_PASSWORD || crypto.randomBytes(12).toString("base64url");
-  if (!process.env.ADMIN_PASSWORD) console.warn(`ADMIN_PASSWORD not set, generated one-time password: ${adminPassword}`);
+  // Only the hash of the default admin password is stored; ADMIN_PASSWORD overrides it
+  const adminPasswordHash = process.env.ADMIN_PASSWORD
+    ? hashPassword(process.env.ADMIN_PASSWORD)
+    : "7b041f88c948794ad158c9982cfc47be:5e6bb51c24e17b6900ad9a2740e1f90e5a3d46bc22bcf2467db651a8eb2768066f3fc6f20859f00bdcb9e8e2cef8bc545faa26d8684cdef3c95bae422deed0f1";
 
   const users = [
     {
       id: crypto.randomUUID(),
       name: "Admin",
-      email: process.env.ADMIN_EMAIL || "admin@schutz-mit-engel.de",
+      email: process.env.ADMIN_EMAIL || "paula-engel@function-concept.de",
       role: "admin",
       active: true,
       order: 0,
-      passwordHash: hashPassword(adminPassword),
+      passwordHash: adminPasswordHash,
       createdAt: nowIso()
     }
   ];
