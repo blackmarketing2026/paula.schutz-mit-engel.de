@@ -11,7 +11,8 @@
   "dependencies": {
     "express": "^4.19.2",
     "imapflow": "^2.1.2",
-    "mailparser": "^3.9.32"
+    "mailparser": "^3.9.32",
+    "mysql2": "^3.24.5"
   },
   "engines": {
     "node": ">=20"

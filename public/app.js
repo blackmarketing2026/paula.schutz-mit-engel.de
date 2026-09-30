@@ -333,7 +333,7 @@ function renderUserRow(user, index, count) {
 
 function storageWarning() {
   if (state.user.role !== "admin" || state.settings?.storageMode !== "tmp") return "";
-  return `<div class="notice">${icon("triangle-alert")} Keine Datenbank verbunden: Leads und Log gehen beim nächsten Neustart auf Vercel verloren. Bitte in Vercel unter Storage „Upstash for Redis“ verbinden.</div>`;
+  return `<div class="notice">${icon("triangle-alert")} Keine Datenbank verbunden: Leads und Log gehen beim nächsten Neustart auf Vercel verloren. Bitte die MYSQL_*-Variablen der All-Inkl-Datenbank in Vercel eintragen.</div>`;
 }
 
 function renderMailPanel() {

@@ -4,6 +4,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { ImapFlow } = require("imapflow");
 const { simpleParser } = require("mailparser");
+const mysql = require("mysql2/promise");
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -21,7 +22,23 @@ const MAIL_BATCH_SIZE = 50;
 const REDIS_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "";
 const REDIS_TOKEN = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN || "";
 const REDIS_KEY = "paula:store";
-const STORAGE_MODE = REDIS_URL && REDIS_TOKEN ? "redis" : process.env.VERCEL ? "tmp" : "file";
+// Persistent storage via MySQL (e.g. All-Inkl); takes precedence over Redis
+const MYSQL_CONFIG = {
+  host: process.env.MYSQL_HOST || "",
+  port: Number(process.env.MYSQL_PORT || 3306),
+  user: process.env.MYSQL_USER || "",
+  password: process.env.MYSQL_PASSWORD || "",
+  database: process.env.MYSQL_DATABASE || ""
+};
+const MYSQL_TABLE = "paula_store";
+const STORAGE_MODE =
+  MYSQL_CONFIG.host && MYSQL_CONFIG.user && MYSQL_CONFIG.database
+    ? "mysql"
+    : REDIS_URL && REDIS_TOKEN
+      ? "redis"
+      : process.env.VERCEL
+        ? "tmp"
+        : "file";
 
 const MAIL_HOST_DEFAULT = "w01997c4.kasserver.com";
 
@@ -116,7 +133,32 @@ async function redis(command) {
   return data.result;
 }
 
+let mysqlPoolPromise = null;
+function mysqlPool() {
+  mysqlPoolPromise ??= (async () => {
+    const pool = mysql.createPool({
+      ...MYSQL_CONFIG,
+      connectionLimit: 2,
+      connectTimeout: 10000,
+      charset: "utf8mb4",
+      ...(process.env.MYSQL_SSL === "true" ? { ssl: { rejectUnauthorized: false } } : {})
+    });
+    await pool.query(
+      `CREATE TABLE IF NOT EXISTS ${MYSQL_TABLE} (id VARCHAR(64) PRIMARY KEY, data LONGTEXT NOT NULL, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP) CHARACTER SET utf8mb4`
+    );
+    return pool;
+  })().catch((error) => {
+    mysqlPoolPromise = null;
+    throw new Error(`Datenbankfehler: ${error.message}`);
+  });
+  return mysqlPoolPromise;
+}
+
 async function loadStoreRaw() {
+  if (STORAGE_MODE === "mysql") {
+    const [rows] = await (await mysqlPool()).query(`SELECT data FROM ${MYSQL_TABLE} WHERE id = ?`, ["main"]);
+    return rows.length ? rows[0].data : null;
+  }
   if (STORAGE_MODE === "redis") return redis(["GET", REDIS_KEY]);
   return fs.existsSync(STORE_PATH) ? fs.readFileSync(STORE_PATH, "utf8") : null;
 }
@@ -131,6 +173,13 @@ async function readStore() {
 
 async function writeStore(store) {
   const json = JSON.stringify(store, null, 2);
+  if (STORAGE_MODE === "mysql") {
+    await (await mysqlPool()).query(
+      `INSERT INTO ${MYSQL_TABLE} (id, data) VALUES (?, ?) ON DUPLICATE KEY UPDATE data = VALUES(data)`,
+      ["main", json]
+    );
+    return;
+  }
   if (STORAGE_MODE === "redis") {
     await redis(["SET", REDIS_KEY, json]);
     return;
