@@ -10,21 +10,33 @@ const WEBHOOK_TOKEN = process.env.WEBHOOK_TOKEN || "local-demo-token";
 const DATA_DIR = path.join(__dirname, "data");
 const STORE_PATH = path.join(DATA_DIR, "store.json");
 
-// All-Inkl mailbox; only credentials come from the environment
-const MAIL_CONFIG = {
-  user: process.env.MAIL_USER || "",
-  pass: process.env.MAIL_PASS || "",
-  from: `Paula <${process.env.MAIL_USER || ""}>`,
-  smtp: { host: "w01997c4.kasserver.com", port: 465, secure: true },
-  imap: { host: "w01997c4.kasserver.com", port: 993, secure: true },
-};
+const MAIL_HOST_DEFAULT = "w01997c4.kasserver.com";
 
-// Inbox that receives leads as JSON emails
-const LEADS_MAIL_CONFIG = {
-  user: process.env.LEADS_MAIL_USER || "",
-  pass: process.env.LEADS_MAIL_PASS || "",
-  imap: { host: "w01997c4.kasserver.com", port: 993, secure: true },
-};
+function mailAccount(prefix) {
+  const env = (key, fallback = "") => process.env[`${prefix}${key}`] || fallback;
+  return {
+    smtp: {
+      host: env("SMTP_HOST", MAIL_HOST_DEFAULT),
+      port: Number(env("SMTP_PORT", "465")),
+      secure: env("SMTP_SECURE", "true") === "true",
+      user: env("SMTP_USER"),
+      pass: env("SMTP_PASS"),
+      from: env("SMTP_FROM"),
+    },
+    imap: {
+      host: env("IMAP_HOST", MAIL_HOST_DEFAULT),
+      port: Number(env("IMAP_PORT", "993")),
+      secure: env("IMAP_SECURE", "true") === "true",
+      user: env("IMAP_USER"),
+      pass: env("IMAP_PASS"),
+    },
+  };
+}
+
+// kontakt@ – outgoing mail
+const MAIL_CONFIG = mailAccount("");
+// paula@ – receives leads as JSON emails
+const LEADS_MAIL_CONFIG = mailAccount("LEADS_");
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
