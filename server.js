@@ -16,7 +16,10 @@ const SESSION_MAX_AGE = 60 * 60 * 24 * 7;
 const STORE_PATH = path.join(DATA_DIR, "store.json");
 const MAX_LOG_ENTRIES = 2000;
 const MAIL_SYNC_INTERVAL_MS = 60 * 1000;
-const MAIL_BATCH_SIZE = 50;
+const MAIL_BATCH_SIZE = 25;
+const MAIL_SYNC_TIME_BUDGET_MS = 40 * 1000;
+// Optional shared secret for /api/cron/mail (Vercel Cron sends it as Bearer token)
+const CRON_SECRET = process.env.CRON_SECRET || "";
 
 // Persistent storage on Vercel: Upstash Redis (Vercel Marketplace sets KV_* or UPSTASH_* vars)
 const REDIS_URL = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL || "";
@@ -188,10 +191,31 @@ async function writeStore(store) {
   fs.writeFileSync(STORE_PATH, json);
 }
 
+// Row lock (SELECT ... FOR UPDATE) keeps concurrent serverless instances from overwriting each other
+async function updateStoreMysql(mutate) {
+  await readStore(); // makes sure the row exists
+  const connection = await (await mysqlPool()).getConnection();
+  try {
+    await connection.beginTransaction();
+    const [rows] = await connection.query(`SELECT data FROM ${MYSQL_TABLE} WHERE id = ? FOR UPDATE`, ["main"]);
+    const store = normalizeStore(JSON.parse(rows[0].data));
+    const result = await mutate(store);
+    await connection.query(`UPDATE ${MYSQL_TABLE} SET data = ? WHERE id = ?`, [JSON.stringify(store, null, 2), "main"]);
+    await connection.commit();
+    return result;
+  } catch (error) {
+    await connection.rollback().catch(() => {});
+    throw error;
+  } finally {
+    connection.release();
+  }
+}
+
 // Serialize read-modify-write cycles within this instance
 let storeQueue = Promise.resolve();
 function updateStore(mutate) {
   const run = storeQueue.then(async () => {
+    if (STORAGE_MODE === "mysql") return updateStoreMysql(mutate);
     const store = await readStore();
     const result = await mutate(store);
     await writeStore(store);
@@ -466,9 +490,9 @@ function findJson(text) {
   return null;
 }
 
-async function fetchNewMails(lastUid, uidValidity) {
+function openLeadsMailbox() {
   const { host, port, secure, user, pass } = LEADS_MAIL_CONFIG.imap;
-  const client = new ImapFlow({
+  return new ImapFlow({
     host,
     port,
     secure,
@@ -478,25 +502,6 @@ async function fetchNewMails(lastUid, uidValidity) {
     greetingTimeout: 10000,
     socketTimeout: 30000
   });
-  await client.connect();
-  const lock = await client.getMailboxLock("INBOX");
-  try {
-    const mailbox = client.mailbox;
-    const currentValidity = String(mailbox.uidValidity);
-    const start = currentValidity === uidValidity ? Number(lastUid || 0) + 1 : 1;
-    const messages = [];
-    if (mailbox.exists > 0) {
-      for await (const message of client.fetch(`${start}:*`, { uid: true, source: true }, { uid: true })) {
-        // "n:*" also returns the newest mail when n is beyond the last UID
-        if (message.uid >= start) messages.push({ uid: message.uid, source: message.source });
-      }
-    }
-    messages.sort((a, b) => a.uid - b.uid);
-    return { uidValidity: currentValidity, messages: messages.slice(0, MAIL_BATCH_SIZE) };
-  } finally {
-    lock.release();
-    await client.logout().catch(() => {});
-  }
 }
 
 async function parseLeadMail(source) {
@@ -518,14 +523,47 @@ async function parseLeadMail(source) {
   };
 }
 
+// Stores one batch of parsed mails as leads, oldest first, and advances the UID cursor
+function applyMailBatch(store, uidValidity, parsed, actor, result) {
+  if (store.settings.mailUidValidity !== uidValidity) {
+    store.settings.mailUidValidity = uidValidity;
+    store.settings.mailLastUid = 0;
+  }
+  for (const mail of parsed) {
+    if (mail.uid <= Number(store.settings.mailLastUid || 0)) continue;
+    store.settings.mailLastUid = mail.uid;
+    const mailInfo = { subject: mail.subject, from: mail.from, date: mail.date, messageId: mail.messageId };
+    if (mail.messageId && store.leads.some((lead) => lead.mailMessageId === mail.messageId)) {
+      result.duplicates++;
+      continue;
+    }
+    if (mail.parseError || !mail.payload) {
+      result.ignored++;
+      addLog(store, "mail", `E-Mail „${mail.subject || "(ohne Betreff)"}“ ignoriert: ${mail.parseError || "kein JSON gefunden"}`, {
+        actor,
+        details: mailInfo
+      });
+      continue;
+    }
+    addLead(store, extractLeadFields(mail.payload), {
+      channel: "E-Mail",
+      actor,
+      defaultSource: "E-Mail-Eingang",
+      extra: { mailMessageId: mail.messageId, mailSubject: mail.subject, mailFrom: mail.from }
+    });
+    result.imported++;
+  }
+}
+
 let mailSyncRunning = null;
 
 function mailSyncConfigured() {
   return Boolean(LEADS_MAIL_CONFIG.imap.user && LEADS_MAIL_CONFIG.imap.pass);
 }
 
-// Imports new emails from paula@ as leads. Throttled unless force is set.
-function syncMailbox({ force = false, actor = "System" } = {}) {
+// Imports all new emails from paula@ as leads, batch by batch, until the inbox is
+// caught up or the time budget is used. Throttled unless force is set.
+function syncMailbox({ force = false, actor = "System", logEmpty = false } = {}) {
   if (mailSyncRunning) return mailSyncRunning;
   mailSyncRunning = (async () => {
     if (!mailSyncConfigured()) return { skipped: "Postfach nicht konfiguriert (LEADS_IMAP_USER / LEADS_IMAP_PASS fehlen)" };
@@ -533,69 +571,72 @@ function syncMailbox({ force = false, actor = "System" } = {}) {
     const lastSync = Date.parse(snapshot.settings.mailLastSyncAt || 0) || 0;
     if (!force && Date.now() - lastSync < MAIL_SYNC_INTERVAL_MS) return { skipped: "Kürzlich abgerufen" };
 
-    let fetched;
+    const startedAt = Date.now();
+    const result = { imported: 0, ignored: 0, duplicates: 0, remaining: 0 };
+    const client = openLeadsMailbox();
     try {
-      fetched = await fetchNewMails(snapshot.settings.mailLastUid, snapshot.settings.mailUidValidity);
+      await client.connect();
+      const lock = await client.getMailboxLock("INBOX");
+      try {
+        const uidValidity = String(client.mailbox.uidValidity);
+        let lastUid = snapshot.settings.mailUidValidity === uidValidity ? Number(snapshot.settings.mailLastUid || 0) : 0;
+
+        while (true) {
+          const uids = client.mailbox.exists > 0 ? ((await client.search({ uid: `${lastUid + 1}:*` }, { uid: true })) || []) : [];
+          // "n:*" also matches the newest mail when n is beyond the last UID
+          const pending = uids.filter((uid) => uid > lastUid).sort((a, b) => a - b);
+          if (!pending.length) break;
+          if (Date.now() - startedAt > MAIL_SYNC_TIME_BUDGET_MS) {
+            result.remaining = pending.length;
+            break;
+          }
+
+          const batch = pending.slice(0, MAIL_BATCH_SIZE);
+          const parsed = [];
+          for await (const message of client.fetch(batch.join(","), { uid: true, source: true }, { uid: true })) {
+            try {
+              parsed.push({ uid: message.uid, ...(await parseLeadMail(message.source)) });
+            } catch (error) {
+              parsed.push({ uid: message.uid, parseError: error.message });
+            }
+          }
+          parsed.sort((a, b) => a.uid - b.uid);
+
+          lastUid = await updateStore((store) => {
+            applyMailBatch(store, uidValidity, parsed, actor, result);
+            return Number(store.settings.mailLastUid || 0);
+          });
+          if (batch.length < MAIL_BATCH_SIZE) break;
+        }
+      } finally {
+        lock.release();
+      }
     } catch (error) {
       await updateStore((store) => {
         store.settings.mailLastSyncAt = nowIso();
         store.settings.mailLastError = error.message;
         addLog(store, "error", `Postfach ${LEADS_MAIL_CONFIG.imap.user} konnte nicht abgerufen werden: ${error.message}`, { actor });
       });
-      return { error: error.message };
+      return { ...result, error: error.message };
+    } finally {
+      await client.logout().catch(() => {});
     }
 
-    const parsed = [];
-    for (const message of fetched.messages) {
-      try {
-        parsed.push({ uid: message.uid, ...(await parseLeadMail(message.source)) });
-      } catch (error) {
-        parsed.push({ uid: message.uid, parseError: error.message });
-      }
-    }
-
-    return updateStore((store) => {
-      const result = { imported: 0, ignored: 0, duplicates: 0 };
-      if (store.settings.mailUidValidity !== fetched.uidValidity) {
-        store.settings.mailUidValidity = fetched.uidValidity;
-        store.settings.mailLastUid = 0;
-      }
-      for (const mail of parsed) {
-        if (mail.uid <= Number(store.settings.mailLastUid || 0)) continue;
-        store.settings.mailLastUid = mail.uid;
-        const mailInfo = { subject: mail.subject, from: mail.from, date: mail.date, messageId: mail.messageId };
-        if (mail.messageId && store.leads.some((lead) => lead.mailMessageId === mail.messageId)) {
-          result.duplicates++;
-          continue;
-        }
-        if (mail.parseError || !mail.payload) {
-          result.ignored++;
-          addLog(store, "mail", `E-Mail „${mail.subject || "(ohne Betreff)"}“ ignoriert: ${mail.parseError || "kein JSON gefunden"}`, {
-            actor,
-            details: mailInfo
-          });
-          continue;
-        }
-        addLead(store, extractLeadFields(mail.payload), {
-          channel: "E-Mail",
-          actor,
-          defaultSource: "E-Mail-Eingang",
-          extra: { mailMessageId: mail.messageId, mailSubject: mail.subject, mailFrom: mail.from }
-        });
-        result.imported++;
-      }
+    await updateStore((store) => {
       store.settings.mailLastSyncAt = nowIso();
       store.settings.mailLastError = "";
-      if (force || result.imported || result.ignored) {
+      if (logEmpty || result.imported || result.ignored || result.remaining) {
         addLog(
           store,
           "mail",
-          `Postfach abgerufen: ${result.imported} neue Leads, ${result.ignored} ignoriert${result.duplicates ? `, ${result.duplicates} doppelt` : ""}`,
+          `Postfach abgerufen: ${result.imported} neue Leads, ${result.ignored} ignoriert` +
+            `${result.duplicates ? `, ${result.duplicates} doppelt` : ""}` +
+            `${result.remaining ? `, ${result.remaining} folgen beim nächsten Abruf` : ""}`,
           { actor }
         );
       }
-      return result;
     });
+    return result;
   })().finally(() => {
     mailSyncRunning = null;
   });
@@ -655,13 +696,17 @@ app.get("/api/dashboard", requireAuth, handle(async (req, res) => {
 }));
 
 app.post("/api/mail/sync", requireAuth, requireAdmin, handle(async (req, res) => {
-  const result = await syncMailbox({ force: true, actor: actorName(req.user) });
+  const result = await syncMailbox({ force: true, actor: actorName(req.user), logEmpty: true });
   if (result.error) return res.status(502).json({ error: `Postfach-Abruf fehlgeschlagen: ${result.error}` });
   res.json(result);
 }));
 
-// Vercel Cron fallback (see vercel.json); import is idempotent, so no secret is needed
+// Called every minute by an external cron service (and daily by Vercel Cron, see vercel.json)
 app.get("/api/cron/mail", handle(async (req, res) => {
+  if (CRON_SECRET) {
+    const provided = req.query.key || String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
+    if (provided !== CRON_SECRET) return res.status(401).json({ error: "Cron-Schlüssel fehlt oder ist falsch" });
+  }
   res.json(await syncMailbox({ force: true, actor: "Cronjob" }));
 }));
 
