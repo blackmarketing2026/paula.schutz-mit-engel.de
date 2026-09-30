@@ -465,6 +465,85 @@ button:disabled {
   text-align: center;
 }
 
+.notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid #fcd34d;
+  border-radius: 8px;
+  background: #fffbeb;
+  color: #92400e;
+  font-weight: 600;
+}
+
+.lead-details {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg);
+  font-size: 13px;
+}
+
+.lead-details dt {
+  color: var(--muted);
+}
+
+.lead-details dd {
+  margin: 2px 0 0;
+  font-weight: 700;
+}
+
+.log-list {
+  display: grid;
+}
+
+.log-row {
+  display: grid;
+  grid-template-columns: 150px 80px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+
+.log-row:last-child {
+  border-bottom: 0;
+}
+
+.log-row time {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.log-row .pill {
+  justify-content: center;
+}
+
+.pill.log-lead {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.pill.log-mail {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.pill.log-auth {
+  background: #dcfce7;
+  color: var(--green);
+}
+
+.pill.log-error {
+  background: #fee2e2;
+  color: var(--red);
+}
+
 @media (max-width: 980px) {
   .login-shell,
   .app-shell,
@@ -508,8 +587,17 @@ button:disabled {
 
   .stats,
   .lead-actions,
-  .user-row {
+  .user-row,
+  .log-row {
     grid-template-columns: 1fr;
+  }
+
+  .log-row {
+    gap: 6px;
+  }
+
+  .log-row .pill {
+    justify-self: start;
   }
 
   .rotation-summary {

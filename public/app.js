@@ -4,8 +4,19 @@ const state = {
   leads: [],
   settings: {},
   rotation: { activeUserIds: [], nextUserId: null },
+  logs: [],
   view: "leads",
-  filter: "all"
+  filter: "all",
+  logFilter: "all"
+};
+
+const logTypeLabels = {
+  lead: "Lead",
+  mail: "E-Mail",
+  auth: "Login",
+  team: "Team",
+  error: "Fehler",
+  system: "System"
 };
 
 const statusLabels = {
@@ -45,6 +56,10 @@ function toast(message) {
 
 function userName(id) {
   return state.users.find((user) => user.id === id)?.name || "Nicht zugewiesen";
+}
+
+function formatDateTime(value) {
+  return new Intl.DateTimeFormat("de-DE", { dateStyle: "short", timeStyle: "medium" }).format(new Date(value));
 }
 
 function formatDate(value) {
@@ -113,7 +128,8 @@ function render() {
         <nav class="nav">
           ${navButton("leads", "inbox", "Leads")}
           ${state.user.role === "admin" ? navButton("team", "users", "Team") : ""}
-          ${state.user.role === "admin" ? navButton("settings", "settings", "Webhook") : ""}
+          ${state.user.role === "admin" ? navButton("settings", "settings", "Lead-Eingang") : ""}
+          ${state.user.role === "admin" ? navButton("log", "scroll-text", "Log") : ""}
         </nav>
         <div class="account">
           <strong>${state.user.name}</strong>
@@ -129,9 +145,11 @@ function render() {
           </div>
           ${state.user.role === "admin" ? `<button class="btn" id="quickLeadBtn" type="button">${icon("plus")} Test-Lead</button>` : ""}
         </header>
+        ${storageWarning()}
         ${state.view === "leads" ? renderLeadsView() : ""}
         ${state.view === "team" ? renderTeamView() : ""}
         ${state.view === "settings" ? renderSettingsView() : ""}
+        ${state.view === "log" ? renderLogView() : ""}
       </section>
     </section>
   `;
@@ -146,6 +164,7 @@ function navButton(view, iconName, label) {
 function pageTitle() {
   if (state.view === "team") return "Team & Rotation";
   if (state.view === "settings") return "Lead-Eingang";
+  if (state.view === "log") return "Log";
   return "Dashboard";
 }
 
@@ -217,6 +236,13 @@ function renderLeadCard(lead) {
         <span>${icon("user-check", 14)} ${escapeHtml(userName(lead.assignedTo))}</span>
       </div>
       ${lead.message ? `<p class="muted">${escapeHtml(lead.message)}</p>` : ""}
+      ${
+        lead.details?.length
+          ? `<dl class="lead-details">${lead.details
+              .map((item) => `<div><dt>${escapeHtml(item.label)}</dt><dd>${escapeHtml(item.value)}</dd></div>`)
+              .join("")}</dl>`
+          : ""
+      }
       <div class="lead-actions">
         <select data-lead-status="${lead.id}" aria-label="Lead-Status">
           ${Object.entries(statusLabels).map(([value, label]) => `<option value="${value}" ${lead.status === value ? "selected" : ""}>${label}</option>`).join("")}
@@ -305,10 +331,85 @@ function renderUserRow(user, index, count) {
   `;
 }
 
+function storageWarning() {
+  if (state.user.role !== "admin" || state.settings?.storageMode !== "tmp") return "";
+  return `<div class="notice">${icon("triangle-alert")} Keine Datenbank verbunden: Leads und Log gehen beim nächsten Neustart auf Vercel verloren. Bitte in Vercel unter Storage „Upstash for Redis“ verbinden.</div>`;
+}
+
+function renderMailPanel() {
+  const settings = state.settings || {};
+  const status = !settings.mailConfigured
+    ? "Nicht eingerichtet: LEADS_IMAP_USER und LEADS_IMAP_PASS fehlen in Vercel."
+    : settings.mailLastError
+      ? `Letzter Abruf fehlgeschlagen: ${settings.mailLastError}`
+      : settings.mailLastSyncAt
+        ? `Zuletzt abgerufen: ${formatDateTime(settings.mailLastSyncAt)}`
+        : "Noch nicht abgerufen.";
+  return `
+    <section class="panel">
+      <h2>E-Mail-Eingang</h2>
+      <p class="muted">Leads als JSON an diese Adresse senden, der Betreff ist egal. Das Postfach wird automatisch abgerufen, solange das Dashboard offen ist (höchstens einmal pro Minute).</p>
+      <label class="field">
+        <span>Adresse</span>
+        <input value="${escapeHtml(settings.leadsMailbox || "")}" readonly />
+      </label>
+      <p class="muted">${escapeHtml(status)}</p>
+      <div class="toolbar" style="margin-top:12px">
+        <button class="btn" id="syncMailBtn" type="button" ${settings.mailConfigured ? "" : "disabled"}>${icon("mail-check")} Postfach jetzt abrufen</button>
+      </div>
+      <pre class="code">[
+  {"name": "full_name", "values": ["Max Mustermann"]},
+  {"name": "email", "values": ["max@example.com"]},
+  {"name": "phone_number", "values": ["+49 170 1234567"]}
+]</pre>
+    </section>
+  `;
+}
+
+function filteredLogs() {
+  return (state.logs || []).filter((entry) => state.logFilter === "all" || entry.type === state.logFilter);
+}
+
+function renderLogView() {
+  const logs = filteredLogs();
+  return `
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Aktivitäten</h2>
+        <div class="toolbar">
+          <select id="logFilterSelect" aria-label="Log filtern">
+            <option value="all">Alle Einträge</option>
+            ${Object.entries(logTypeLabels).map(([value, label]) => `<option value="${value}" ${state.logFilter === value ? "selected" : ""}>${label}</option>`).join("")}
+          </select>
+          <button class="btn secondary" id="refreshLogBtn" type="button">${icon("refresh-cw")} Aktualisieren</button>
+        </div>
+      </div>
+      ${
+        logs.length
+          ? `<div class="log-list">${logs
+              .map(
+                (entry) => `
+                <div class="log-row">
+                  <time datetime="${escapeHtml(entry.at)}">${formatDateTime(entry.at)}</time>
+                  <span class="pill log-${escapeHtml(entry.type)}">${escapeHtml(logTypeLabels[entry.type] || entry.type)}</span>
+                  <div>
+                    <div>${escapeHtml(entry.message)}</div>
+                    <small class="muted">${escapeHtml(entry.actor || "System")}</small>
+                  </div>
+                </div>`
+              )
+              .join("")}</div>`
+          : `<div class="empty">Noch keine Einträge.</div>`
+      }
+    </section>
+  `;
+}
+
 function renderSettingsView() {
   const sampleUrl = `${location.origin}/webhook/facebook?token=${state.settings.webhookToken || "local-demo-token"}`;
   return `
-    <section class="panel">
+    ${renderMailPanel()}
+    <section class="panel" style="margin-top:16px">
       <h2>Facebook/IFTTT Webhook</h2>
       <p class="muted">IFTTT kann den rohen JSON-Body per POST an diese URL senden. Das Dashboard erkennt typische Felder wie name, full_name, email, phone_number, campaign_name und form_name.</p>
       <label class="field">
@@ -405,6 +506,25 @@ function bindEvents() {
     button.addEventListener("click", () => saveRotationOrder(orderedSalesUsers().map((user) => user.id), button.dataset.nextUser));
   });
 
+  document.querySelector("#logFilterSelect")?.addEventListener("change", (event) => {
+    state.logFilter = event.target.value;
+    render();
+  });
+
+  document.querySelector("#refreshLogBtn")?.addEventListener("click", () => loadDashboard().catch((error) => toast(error.message)));
+
+  document.querySelector("#syncMailBtn")?.addEventListener("click", async (event) => {
+    event.currentTarget.disabled = true;
+    try {
+      const result = await api("/api/mail/sync", { method: "POST" });
+      toast(result.skipped || `${result.imported} neue Leads, ${result.ignored} E-Mails ohne JSON.`);
+      await loadDashboard();
+    } catch (error) {
+      toast(error.message);
+      await loadDashboard().catch(() => {});
+    }
+  });
+
   document.querySelector("#copyWebhookBtn")?.addEventListener("click", async () => {
     await navigator.clipboard.writeText(document.querySelector("#webhookUrl").value);
     toast("Webhook URL kopiert.");
@@ -477,5 +597,18 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
+
+// Refresh every minute; this also triggers the mailbox import on the server
+function hasDraft() {
+  const active = document.activeElement;
+  if (active && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName)) return true;
+  return [...document.querySelectorAll("#leadForm input, #leadForm textarea, #userForm input")].some(
+    (field) => field.value && field.value !== field.defaultValue
+  );
+}
+
+setInterval(() => {
+  if (state.user && !document.hidden && !hasDraft()) loadDashboard().catch(() => {});
+}, 60 * 1000);
 
 trySession();
