@@ -121,8 +121,21 @@ function normalizeStore(store) {
   store.users = store.users || [];
   store.leads = store.leads || [];
   store.logs = store.logs || [];
+  store.templates = store.templates || defaultTemplates();
   delete store.sessions;
   return store;
+}
+
+function defaultTemplates() {
+  const template = (title, text) => ({ id: crypto.randomUUID(), title, text, createdAt: nowIso(), updatedAt: nowIso() });
+  return [
+    template(
+      "Erstkontakt",
+      "Hallo {vorname}, hier ist {berater} von Schutz mit Engel. Du hattest dich für unseren Rechtsschutz interessiert. Wann passt es dir für ein kurzes Telefonat?"
+    ),
+    template("Nicht erreicht", "Hallo {vorname}, ich habe gerade versucht, dich anzurufen. Wann bist du am besten erreichbar? Viele Grüße, {berater}"),
+    template("Terminbestätigung", "Hallo {vorname}, danke für das nette Gespräch! Wie besprochen melde ich mich zum vereinbarten Termin. Viele Grüße, {berater}")
+  ];
 }
 
 async function redis(command) {
@@ -168,7 +181,13 @@ async function loadStoreRaw() {
 
 async function readStore() {
   const raw = await loadStoreRaw();
-  if (raw) return normalizeStore(JSON.parse(raw));
+  if (raw) {
+    const parsed = JSON.parse(raw);
+    const needsMigration = !parsed.templates;
+    const store = normalizeStore(parsed);
+    if (needsMigration) await writeStore(store);
+    return store;
+  }
   const store = createInitialStore();
   await writeStore(store);
   return store;
@@ -283,7 +302,7 @@ async function getCurrentUser(req) {
   }
   if (!session.email || Date.now() > Number(session.expires)) return null;
   const store = await readStore();
-  return store.users.find((user) => user.active !== false && user.email.toLowerCase() === session.email) || null;
+  return store.users.find((user) => !user.locked && user.email.toLowerCase() === session.email) || null;
 }
 
 // Wraps async handlers so errors become JSON 500 responses
@@ -384,7 +403,7 @@ function flatten(value, prefix = "", output = {}) {
 
 function activeSalesUsers(store) {
   return store.users
-    .filter((user) => user.role === "sales" && user.active)
+    .filter((user) => user.role === "sales" && user.active && !user.locked)
     .sort((a, b) => Number(a.order || 0) - Number(b.order || 0) || a.name.localeCompare(b.name));
 }
 
@@ -649,14 +668,19 @@ app.post("/api/login", handle(async (req, res) => {
   const { email, password } = req.body || {};
   const user = await updateStore((store) => {
     const candidate = store.users.find((entry) => entry.email.toLowerCase() === String(email || "").toLowerCase());
-    if (!candidate || candidate.active === false || !verifyPassword(String(password || ""), candidate.passwordHash)) {
+    if (!candidate || !verifyPassword(String(password || ""), candidate.passwordHash)) {
       addLog(store, "auth", `Fehlgeschlagener Login für „${String(email || "").slice(0, 100)}“`, { details: { ip: req.ip } });
       return null;
+    }
+    if (candidate.locked) {
+      addLog(store, "auth", "Login abgelehnt: Zugang gesperrt", { actor: actorName(candidate), details: { ip: req.ip } });
+      return { locked: true };
     }
     addLog(store, "auth", "Login erfolgreich", { actor: actorName(candidate) });
     return candidate;
   });
   if (!user) return res.status(401).json({ error: "E-Mail oder Passwort stimmt nicht" });
+  if (user.locked) return res.status(403).json({ error: "Dein Zugang ist gesperrt. Bitte wende dich an den Admin." });
   createSession(res, user);
   res.json({ user: publicUser(user) });
 }));
@@ -691,6 +715,7 @@ app.get("/api/dashboard", requireAuth, handle(async (req, res) => {
         }
       : undefined,
     rotation: isAdmin ? rotationSnapshot(store) : undefined,
+    templates: store.templates,
     logs: isAdmin ? store.logs.slice(0, 500) : undefined
   });
 }));
@@ -745,9 +770,112 @@ app.patch("/api/leads/:id", requireAuth, handle(async (req, res) => {
   res.json({ lead: outcome.lead });
 }));
 
+// Loads a lead the current user may work on, or returns an error outcome
+function findAccessibleLead(store, user, leadId) {
+  const lead = store.leads.find((candidate) => candidate.id === leadId);
+  if (!lead) return { status: 404, error: "Lead nicht gefunden" };
+  if (user.role !== "admin" && lead.assignedTo !== user.id) return { status: 403, error: "Kein Zugriff auf diesen Lead" };
+  return { lead };
+}
+
+function sendOutcome(res, outcome, successStatus = 200) {
+  if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
+  res.status(successStatus).json(outcome);
+}
+
+app.post("/api/leads/:id/notes", requireAuth, handle(async (req, res) => {
+  const text = String(req.body?.text || "").trim();
+  if (!text) return res.status(400).json({ error: "Die Notiz ist leer" });
+  if (text.length > 10000) return res.status(400).json({ error: "Die Notiz ist zu lang" });
+  const outcome = await updateStore((store) => {
+    const found = findAccessibleLead(store, req.user, req.params.id);
+    if (found.error) return found;
+    const note = { id: crypto.randomUUID(), at: nowIso(), authorId: req.user.id, authorName: req.user.name, text };
+    found.lead.notes = [note, ...(found.lead.notes || [])];
+    found.lead.updatedAt = nowIso();
+    addLog(store, "lead", `Gesprächsnotiz zu „${found.lead.name}“ hinzugefügt`, { actor: actorName(req.user), details: { leadId: found.lead.id } });
+    return { note, lead: found.lead };
+  });
+  sendOutcome(res, outcome, 201);
+}));
+
+app.delete("/api/leads/:id/notes/:noteId", requireAuth, handle(async (req, res) => {
+  const outcome = await updateStore((store) => {
+    const found = findAccessibleLead(store, req.user, req.params.id);
+    if (found.error) return found;
+    const note = (found.lead.notes || []).find((entry) => entry.id === req.params.noteId);
+    if (!note) return { status: 404, error: "Notiz nicht gefunden" };
+    if (req.user.role !== "admin" && note.authorId !== req.user.id) return { status: 403, error: "Nur eigene Notizen können gelöscht werden" };
+    found.lead.notes = found.lead.notes.filter((entry) => entry.id !== note.id);
+    addLog(store, "lead", `Gesprächsnotiz zu „${found.lead.name}“ gelöscht`, { actor: actorName(req.user), details: { leadId: found.lead.id, text: note.text } });
+    return { lead: found.lead };
+  });
+  sendOutcome(res, outcome);
+}));
+
+const CONTACT_CHANNELS = { phone: "Anruf", whatsapp: "WhatsApp", email: "E-Mail", template: "Textbaustein kopiert" };
+
+app.post("/api/leads/:id/contact", requireAuth, handle(async (req, res) => {
+  const channel = CONTACT_CHANNELS[req.body?.channel];
+  if (!channel) return res.status(400).json({ error: "Unbekannter Kontaktweg" });
+  const outcome = await updateStore((store) => {
+    const found = findAccessibleLead(store, req.user, req.params.id);
+    if (found.error) return found;
+    const suffix = req.body.template ? `: „${String(req.body.template).slice(0, 100)}“` : "";
+    addLog(store, "contact", `${channel} bei „${found.lead.name}“${suffix}`, { actor: actorName(req.user), details: { leadId: found.lead.id } });
+    return { ok: true };
+  });
+  sendOutcome(res, outcome);
+}));
+
+function templateInput(body) {
+  const title = String(body?.title || "").trim();
+  const text = String(body?.text || "").trim();
+  if (!title || !text) return { error: "Titel und Text sind Pflicht" };
+  if (title.length > 100 || text.length > 5000) return { error: "Titel oder Text ist zu lang" };
+  return { title, text };
+}
+
+app.post("/api/templates", requireAuth, handle(async (req, res) => {
+  const input = templateInput(req.body);
+  if (input.error) return res.status(400).json({ error: input.error });
+  const template = await updateStore((store) => {
+    const created = { id: crypto.randomUUID(), ...input, createdBy: req.user.id, createdAt: nowIso(), updatedAt: nowIso() };
+    store.templates.push(created);
+    addLog(store, "template", `Textbaustein „${created.title}“ angelegt`, { actor: actorName(req.user) });
+    return created;
+  });
+  res.status(201).json({ template });
+}));
+
+app.patch("/api/templates/:id", requireAuth, handle(async (req, res) => {
+  const input = templateInput(req.body);
+  if (input.error) return res.status(400).json({ error: input.error });
+  const outcome = await updateStore((store) => {
+    const template = store.templates.find((entry) => entry.id === req.params.id);
+    if (!template) return { status: 404, error: "Textbaustein nicht gefunden" };
+    Object.assign(template, input, { updatedAt: nowIso() });
+    addLog(store, "template", `Textbaustein „${template.title}“ bearbeitet`, { actor: actorName(req.user) });
+    return { template };
+  });
+  sendOutcome(res, outcome);
+}));
+
+app.delete("/api/templates/:id", requireAuth, handle(async (req, res) => {
+  const outcome = await updateStore((store) => {
+    const template = store.templates.find((entry) => entry.id === req.params.id);
+    if (!template) return { status: 404, error: "Textbaustein nicht gefunden" };
+    store.templates = store.templates.filter((entry) => entry.id !== template.id);
+    addLog(store, "template", `Textbaustein „${template.title}“ gelöscht`, { actor: actorName(req.user), details: { text: template.text } });
+    return { ok: true };
+  });
+  sendOutcome(res, outcome);
+}));
+
 app.post("/api/users", requireAuth, requireAdmin, handle(async (req, res) => {
   const { name, email, role = "sales", password } = req.body || {};
   if (!name || !email || !password) return res.status(400).json({ error: "Name, E-Mail und Passwort sind Pflicht" });
+  if (String(password).length < 8) return res.status(400).json({ error: "Das Passwort muss mindestens 8 Zeichen haben" });
   const user = await updateStore((store) => {
     if (store.users.some((entry) => entry.email.toLowerCase() === String(email).toLowerCase())) return null;
     const created = {
@@ -756,6 +884,7 @@ app.post("/api/users", requireAuth, requireAdmin, handle(async (req, res) => {
       email: String(email),
       role: role === "admin" ? "admin" : "sales",
       active: true,
+      locked: false,
       order: Math.max(0, ...store.users.map((candidate) => Number(candidate.order || 0))) + 1,
       passwordHash: hashPassword(String(password)),
       createdAt: nowIso()
@@ -769,29 +898,50 @@ app.post("/api/users", requireAuth, requireAdmin, handle(async (req, res) => {
 }));
 
 app.patch("/api/users/:id", requireAuth, requireAdmin, handle(async (req, res) => {
-  const user = await updateStore((store) => {
+  const body = req.body || {};
+  if (body.password !== undefined && String(body.password).length < 8) {
+    return res.status(400).json({ error: "Das Passwort muss mindestens 8 Zeichen haben" });
+  }
+  const outcome = await updateStore((store) => {
     const target = store.users.find((candidate) => candidate.id === req.params.id);
-    if (!target) return null;
+    if (!target) return { status: 404, error: "Nutzer nicht gefunden" };
+    const isSelf = target.id === req.user.id;
+    if (isSelf && body.locked === true) return { status: 400, error: "Du kannst deinen eigenen Zugang nicht sperren" };
+    if (isSelf && body.role && body.role !== "admin") return { status: 400, error: "Du kannst dir die Admin-Rechte nicht selbst entziehen" };
+    if (body.email !== undefined) {
+      const email = String(body.email).trim();
+      if (!email) return { status: 400, error: "E-Mail darf nicht leer sein" };
+      if (store.users.some((user) => user.id !== target.id && user.email.toLowerCase() === email.toLowerCase())) {
+        return { status: 409, error: "Diese E-Mail existiert bereits" };
+      }
+      body.email = email;
+    }
+    if (body.name !== undefined && !String(body.name).trim()) return { status: 400, error: "Name darf nicht leer sein" };
+    if (body.role !== undefined) body.role = body.role === "admin" ? "admin" : "sales";
+
     const previousNextUserId = rotationSnapshot(store).nextUserId;
     const changes = [];
-    for (const key of ["name", "email", "role", "active", "order"]) {
-      if (req.body[key] === undefined || req.body[key] === target[key]) continue;
-      changes.push(key === "active" ? (req.body.active ? "aktiviert" : "deaktiviert") : `${key}: ${target[key]} → ${req.body[key]}`);
-      target[key] = req.body[key];
+    const labels = { name: "Name", email: "E-Mail", role: "Rolle", order: "Position" };
+    for (const key of ["name", "email", "role", "active", "locked", "order"]) {
+      if (body[key] === undefined || body[key] === target[key]) continue;
+      if (key === "active") changes.push(body.active ? "in Rotation aufgenommen" : "aus Rotation genommen");
+      else if (key === "locked") changes.push(body.locked ? "Zugang gesperrt" : "Zugang entsperrt");
+      else changes.push(`${labels[key]}: ${target[key]} → ${body[key]}`);
+      target[key] = key === "name" ? String(body[key]).trim() : body[key];
     }
-    if (req.body.password) {
-      target.passwordHash = hashPassword(String(req.body.password));
-      changes.push("Passwort geändert");
+    if (body.password) {
+      target.passwordHash = hashPassword(String(body.password));
+      changes.push("Passwort zurückgesetzt");
     }
     normalizeSalesOrder(store);
     const active = activeSalesUsers(store);
     const nextIndex = active.findIndex((candidate) => candidate.id === previousNextUserId);
     store.settings.rotationIndex = nextIndex >= 0 ? nextIndex : 0;
     if (changes.length) addLog(store, "team", `Nutzer „${target.name}“: ${changes.join(", ")}`, { actor: actorName(req.user) });
-    return target;
+    return { user: target };
   });
-  if (!user) return res.status(404).json({ error: "Nutzer nicht gefunden" });
-  res.json({ user: publicUser(user) });
+  if (outcome.error) return res.status(outcome.status).json({ error: outcome.error });
+  res.json({ user: publicUser(outcome.user) });
 }));
 
 app.patch("/api/rotation", requireAuth, requireAdmin, handle(async (req, res) => {

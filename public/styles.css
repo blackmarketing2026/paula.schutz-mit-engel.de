@@ -373,19 +373,29 @@ textarea:focus {
 
 .lead-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 10px;
   margin-top: 14px;
 }
 
 .user-row {
-  display: grid;
-  grid-template-columns: 42px minmax(170px, 1fr) 96px 92px minmax(130px, 150px) 92px;
+  display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   align-items: center;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
+}
+
+.user-row > div:nth-child(2) {
+  flex: 1 1 160px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.user-row .btn {
+  white-space: nowrap;
 }
 
 .user-row.next {
@@ -544,10 +554,149 @@ button:disabled {
   color: var(--red);
 }
 
+a.btn {
+  text-decoration: none;
+}
+
+.btn.whatsapp {
+  background: #16a34a;
+  color: #fff;
+}
+
+.btn.danger {
+  background: var(--red);
+  color: #fff;
+}
+
+.small {
+  font-size: 12px;
+}
+
+.contact-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.back-btn {
+  margin-bottom: 12px;
+  padding-left: 0;
+}
+
+.stack {
+  display: grid;
+  gap: 18px;
+}
+
+.file-grid {
+  grid-template-columns: minmax(0, 1.2fr) minmax(340px, 1fr);
+}
+
+.note-list,
+.template-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.note,
+.template {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.note p,
+.template p {
+  margin: 8px 0 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.template .toolbar {
+  margin-top: 10px;
+}
+
+.note-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.note-head strong {
+  color: var(--text);
+}
+
+.template-form {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.template-form h3 {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.input-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.credentials {
+  margin-bottom: 18px;
+  padding: 16px;
+  border: 1px solid #86efac;
+  border-radius: 8px;
+  background: #f0fdf4;
+}
+
+.credentials .code {
+  margin: 10px 0;
+  white-space: pre-wrap;
+}
+
+.danger-zone {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.access-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.access-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.access-row.locked,
+.user-row.locked {
+  background: #fef2f2;
+}
+
 @media (max-width: 980px) {
   .login-shell,
   .app-shell,
-  .grid {
+  .grid,
+  .file-grid {
     grid-template-columns: 1fr;
   }
 
@@ -588,7 +737,8 @@ button:disabled {
   .stats,
   .lead-actions,
   .user-row,
-  .log-row {
+  .log-row,
+  .access-row {
     grid-template-columns: 1fr;
   }
 
